@@ -23,9 +23,9 @@ mod config;
 
 #[cfg(test)]
 extern crate assert_cmd;
-extern crate reqwest;
 extern crate rpassword;
 extern crate serde;
+extern crate ureq;
 extern crate zeroize;
 
 #[macro_use]
@@ -33,9 +33,6 @@ pub mod api;
 
 #[cfg(test)]
 use assert_cmd::prelude::*;
-use reqwest::blocking::Client;
-use reqwest::header;
-use reqwest::StatusCode;
 use std::io::{stdin, BufRead};
 use std::panic;
 #[cfg(test)]
@@ -46,7 +43,7 @@ use zeroize::Zeroize;
 fn acc_check(data_search: &str) {
     set_checkpwn_panic!(api::errors::MISSING_API_KEY);
     let mut config = config::Config::new();
-    config.load_config();
+    config.load_config().unwrap();
 
     // Check if user wants to check a local list
     if data_search.ends_with(".ls") {
@@ -60,7 +57,7 @@ fn acc_check(data_search: &str) {
                 continue;
             }
             api::acc_breach_request(&line, &config.api_key);
-            // Only one request every 1500 milliseconds from any given IP
+            // HIBP limits requests to one per 1500 milliseconds. We're allowing for 1600 below as a buffer.
             thread::sleep(time::Duration::from_millis(1600));
         }
     } else {
@@ -69,32 +66,24 @@ fn acc_check(data_search: &str) {
 }
 
 fn pass_check(data_search: &api::PassArg) {
-    let mut headers = header::HeaderMap::new();
-    headers.insert(
-        header::USER_AGENT,
-        header::HeaderValue::from_static(api::CHECKPWN_USER_AGENT),
-    );
-    headers.insert(
-        "Add-Padding",
-        header::HeaderValue::from_str("true").unwrap(),
-    );
-
-    let client = Client::builder().default_headers(headers).build().unwrap();
-
     let mut hashed_password = api::hash_password(&data_search.password);
     let uri_acc = api::arg_to_api_route(&api::CheckableChoices::PASS, &hashed_password);
 
     set_checkpwn_panic!(api::errors::NETWORK_ERROR);
-    let pass_stat = client.get(&uri_acc).send().unwrap();
+    let pass_stat = ureq::get(&uri_acc)
+        .set("User-Agent", api::CHECKPWN_USER_AGENT)
+        .set("Add-Padding", "true")
+        .timeout_connect(10_000)
+        .call();
 
     set_checkpwn_panic!(api::errors::DECODING_ERROR);
     let request_status = pass_stat.status();
-    let pass_body: String = pass_stat.text().unwrap();
+    let pass_body: String = pass_stat.into_string().unwrap();
 
     if api::search_in_range(&pass_body, &hashed_password) {
         api::breach_report(request_status, "", true);
     } else {
-        api::breach_report(StatusCode::NOT_FOUND, "", true);
+        api::breach_report(404, "", true);
     }
 
     // Zero out as this contains a weakly hashed password
@@ -159,7 +148,7 @@ fn main() {
     for argument in argvs.iter_mut() {
         argument.zeroize();
     }
-    // Only one request every 1500 milliseconds from any given IP
+    // Only one request every 1600 milliseconds from any given IP
     thread::sleep(time::Duration::from_millis(1600));
 }
 
